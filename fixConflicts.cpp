@@ -3,14 +3,22 @@
 #include <iostream>
 #include <regex>
 
+// Print whitespace
+void printWS(int sp){
+    do {
+        std::cout << " ";
+        --sp;
+    } while(sp != 0);
+}
 
-void lookupDpendencies(FILE **listPkgsLookUp, char *packageName[], std::string *depends) {
+void lookupDependencies(FILE **listPkgsLookUp, std::string packageName) {
 
+    std::string depends;
     std::vector<std::string> pkges;
 
     // std::string clicommand = "apt-cache depends ";
     std::string clicommand = "dpkg -s ";
-    clicommand += packageName[1];
+    clicommand += packageName;
     // clicommand += " | grep '^Depends:\s' | cut -d : -f 2";
     clicommand += " | grep -w '^Depends:'";
 
@@ -22,37 +30,46 @@ void lookupDpendencies(FILE **listPkgsLookUp, char *packageName[], std::string *
 
     char data[128];
     while(fgets(data, sizeof(data), *listPkgsLookUp) != nullptr) {
-        *depends += (std::string)data;
+        depends += (std::string)data;
     }
 
-    if (depends->find("Depends: ") != std::string::npos){
-        depends->replace(depends->find("Depends: "), std::string("Depends: ").length(), "");
+    if (depends.find("Depends: ") != std::string::npos){
+        depends.replace(depends.find("Depends: "), std::string("Depends: ").length(), "");
 
         // std::cout << "\nDependencies 1: " << *depends << "\n";
         
+        // Remove parentheses and their content
         std::regex rgx("\\([^)]*\\)");
-        *depends = std::regex_replace(*depends, rgx, "");
+        depends = std::regex_replace(depends, rgx, "");
+        // Remove white spaces
         std::regex rgx2(" ?");
-        *depends = std::regex_replace(*depends, rgx2, "");
-        if (depends->find("|") != std::string::npos){
-            depends->replace(depends->find("|"), std::string("|").length(), ",");    
+        depends = std::regex_replace(depends, rgx2, "");
+        // Substitute "|" for ","
+        if (depends.find("|") != std::string::npos){
+            depends.replace(depends.find("|"), std::string("|").length(), ",");    
         }
 
-        auto pos_ = depends->find(",");
+        // Divide "depends" string by "," and store each word into pkges
+        auto pos_ = depends.find(",");
         while (pos_ != std::string::npos) {
-            pkges.push_back(depends->substr(0, pos_));
-            depends->erase(0, ++pos_);
-            pos_ = depends->find(",");
+            pkges.push_back(depends.substr(0, pos_));
+            depends.erase(0, ++pos_);
+            pos_ = depends.find(",");
             if (pos_ == std::string::npos){
-                pkges.push_back(depends->substr(0, pos_));
+                pkges.push_back(depends.substr(0, pos_));
                 break;
             }
         }
 
+        // Printing out a tree made of dependences with a given format
         std::cout << "\nDependencies:" << std::endl;
+        int top = 1;
+        std::cout << top << " " << packageName << std::endl;
 
-        for (int i = 0; i < pkges.size(); i++){
-            std::cout << i + 1 << " " << pkges[i] << "\n";
+        for (std::string pkge : pkges){
+            printWS(top);
+            std::cout << ++top << " " + pkge << "\n";
+            lookupDependencies(listPkgsLookUp, pkge);
         }
     }
 }
@@ -61,7 +78,7 @@ int main(int argc, char *argv[]) {
     
     // std::cout << argc << std::endl;
     // std::cout << argv[0] << std::endl;
-    // std::cout << argv[1] << std::endl;
+    // std::cout << (std::string)argv[1] << std::endl;
     // std::cout << argv[2] << std::endl;
     // std::cout << sizeof(*argv[0]) << std::endl;
     // std::cout << sizeof(*argv[1]) << std::endl;
@@ -71,8 +88,9 @@ int main(int argc, char *argv[]) {
     // return 0;
 
     FILE *listPkgs;
-    std::string dependencies;
-    lookupDpendencies(&listPkgs, argv, &dependencies);
+
+    lookupDependencies(&listPkgs, (std::string)argv[1]);
+
     pclose(listPkgs);
     return 0;
 }
