@@ -11,7 +11,7 @@ void printWS(int sp){
     } while(sp != 0);
 }
 
-void lookupDependencies(std::string packageName, int column) {
+void lookupDependencies(std::string packageName, int column, std::vector<std::string> *required_depend) {
 
 // Variables 
     FILE *listPkgsLookUp;
@@ -91,15 +91,16 @@ void lookupDependencies(std::string packageName, int column) {
         
         // Printing out a tree made of dependences with a given format
         for (std::string pkge : pkges){
+            required_depend->push_back(pkge);
             printWS(column);
             std::cout << column + 1 << " " + pkge << "\n";
-            lookupDependencies(pkge, column + 1);
+            lookupDependencies(pkge, column + 1, required_depend);
         }
     }
     else {
         std::cout << "No dependencies found." << std::endl;
         pclose(listPkgsLookUp);
-    }
+    }    
 
     // pclose(listPkgs);
 }
@@ -117,10 +118,16 @@ int main(int argc, char *argv[]) {
     // std::cout << sizeof(argv)/sizeof(char);
     // return 0;
 
+    std::vector<std::string> required_depend;
     std::cout << "\nDependencies:" << std::endl;
     int column = 1;
     std::cout << column << " " << (std::string)argv[1] << std::endl;
-    lookupDependencies((std::string)argv[1], column);
+    lookupDependencies((std::string)argv[1], column, &required_depend);
+
+    std::cout << "\nrequired_depends:" << "\n";
+    for (std::string pkge : required_depend){
+        std::cout << pkge << "\n";
+    }
 
     return 0;
 }
