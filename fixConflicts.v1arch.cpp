@@ -8,6 +8,8 @@
 // Global variables
 std::set<std::string> pkge_processed;
 std::vector<std::string> removed_pkges;
+std::string current_pkge_to_remove = "";
+bool remove_pkge = false;
 
 // Regex patterns
 std::regex pattern_rgx_conflict(R"((?!.*\[y,N\])(\S+)\s+and\s+(\S+) are in conflict)");
@@ -36,6 +38,7 @@ enum ProceedureStatus {
     FILE_CONFLICTS_RESOLVED = 3,
     TARGET_NOT_FOUND_RESOLVED = 4,
     INSTALLED_PACKAGE = 5,
+    PKGES_REQUIRED_TO_REMOVE = 6,
     DONE = 8,
     ERROR_OCCURRED = -1
 };
@@ -51,12 +54,19 @@ std::string remove_package(std::string packageName);
 int main(int argc, char *argv[]) {
 
     ProceedureStatus status;
+    std::string commandline_input;
 
     // Sanitizing input
     if (argc > 2 || argc < 2 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
         std::cerr << "\nUsage: " << argv[0] << " [optional: package_name]" << "   :   Fix conflicts for a specific package" << std::endl;
         std::cerr << "Usage: " << argv[0] << " --fix" << "  :   Fix all conflicts automatically" << "\n\n";
         return EXIT_FAILURE;
+    }
+
+    if (std::string(argv[1]) == "--fix") {
+        commandline_input = "--fix";
+    } else {
+        commandline_input = std::string(argv[1]);
     }
 
     printf("\nRunning pacman to see packages in conflict...:\n\n");
@@ -96,13 +106,19 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
         pkge_processed.clear();
 
     } else if (pkge_processed.count(packageName) > 0) {
-        printf("[ALREADY PROCESSED] >> %s%s\n\n", packageName.c_str(), ". Desinstalling...");
+        printf("\n[PKGE(S) REQUIRE(S) TO BE REMOVED] >> %s%s\n\n", packageName.c_str());
 
-        remove_package(packageName);
+        current_pkge_to_remove = packageName;
+
+        remove_pkge = true;
+
+        return PKGES_REQUIRED_TO_REMOVE;
+
+        /* remove_package(packageName);
 
         pkge_processed.clear();
         
-        return DONE;
+        return DONE; */
 
     } else {
         pkge_processed.insert(packageName);
@@ -147,7 +163,6 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
 
         } else if (std::regex_search(depends, pattern_rgx_target_not_found)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_target_not_found, IssueType::TARGET_NOT_FOUND);
-            pkge_processed.clear();
             return TARGET_NOT_FOUND_RESOLVED;
 
         } else if (std::regex_search(depends, pattern_rgx_nothing_to_fix)) {
@@ -233,6 +248,14 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                 printf("[REQUIRED BY] >> %s required by %s\n\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
                 do {
                     status = inspect_and_resolve_packages(findingMatches->str(2));
+                    if (remove_pkge) {
+                        if (findingMatches->str(2) == current_pkge_to_remove) {
+                            remove_package(current_pkge_to_remove);
+                            pkge_processed.erase(current_pkge_to_remove);
+                            remove_pkge = false;
+                            current_pkge_to_remove = "";
+                        }
+                    }
                     
                 } while ((status != DONE) && (status != INSTALLED_PACKAGE) && (status != TARGET_NOT_FOUND_RESOLVED));
                 break;
@@ -278,7 +301,6 @@ std::string remove_package(std::string packageName) {
     std::smatch match;
     std::string clicommand = "pacman -Qi " + packageName + " 2>&1";
     std::vector<std::string> removed_pkges_requiredby;
-    std::string popen_output;
 
     removed_pkges_requiredby.push_back(packageName);
 
