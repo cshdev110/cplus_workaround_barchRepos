@@ -5,6 +5,9 @@
 #include <set>
 #include <algorithm>
 
+#include <thread>
+#include <chrono>
+
 // Global variables
 std::set<std::string> pkge_processed;
 std::vector<std::string> removed_pkges;
@@ -12,14 +15,14 @@ std::string current_pkge_to_remove = "";
 bool remove_pkge = false;
 
 // Regex patterns
-std::regex pattern_rgx_conflict(R"((?!.*\[y,N\])(\S+)\s+and\s+(\S+) are in conflict)");
+std::regex pattern_rgx_conflict(R"((?!.*\[y/N\])(\S+)\s+and\s+(\S+) are in conflict)");
 std::regex pattern_rgx_requiredby(R"((\S+)\s+required by\s+(\S+))");
 std::regex pattern_rgx_conflict_files(R"((\S+):\s(\S+)\s+exists in filesystem \(owned by)");
 std::regex pattern_rgx_up_to_date(R"(\s*is up to date\s*-+\s*reinstalling)");
 std::regex pattern_rgx_target_not_found(R"(\s*target not found:\s+(\S+))");
 std::regex pattern_rgx_was_not_found(R"(\s+package '(\S+)' was not found)");
 std::regex pattern_rgx_nothing_to_fix(R"(.*there is nothing to do.*)");
-std::regex pattern_rgx_unknown_issue(R"(error:)");
+// std::regex pattern_rgx_unknown_issue(R"(error:)");
 
 // Enum for issue types
 enum class IssueType {
@@ -39,6 +42,7 @@ enum ProceedureStatus {
     TARGET_NOT_FOUND_RESOLVED = 4,
     INSTALLED_PACKAGE = 5,
     PKGES_REQUIRED_TO_REMOVE = 6,
+    CONTINUE_PROCESSING = 7,
     DONE = 8,
     ERROR_OCCURRED = -1
 };
@@ -70,19 +74,36 @@ int main(int argc, char *argv[]) {
     }
 
     printf("\nRunning pacman to see packages in conflict...:\n\n");
+
     do {
+        // Reinstalling removed packages
+        if (!removed_pkges.empty()) {
+            printf("\nReinstalling removed packages...\n");
+
+            std::string get_pgkes_info = "pacman -Qi ";
+
+            for (const auto& pkge : removed_pkges) {
+                get_pgkes_info += pkge;
+                if (std::regex_search(popen_exec(&get_pgkes_info), pattern_rgx_was_not_found)) {
+                    printf("[PACKAGE NOT FOUND] >> %s was not found in the repositories. Skipping reinstall.\n", pkge.c_str());
+                    removed_pkges.erase(std::find(removed_pkges.begin(), removed_pkges.end(), pkge));
+                }
+            }
+
+            std::string reinstall_cmd = "sudo pacman -Sy --noconfirm ";
+            for (const auto& pkge : removed_pkges) {
+                reinstall_cmd += pkge + " ";
+            }
+
+            popen_exec(&reinstall_cmd);
+
+        }
+
         status = inspect_and_resolve_packages("--fix");
+
     } while (status != NOTHING_TO_DO && status != ERROR_OCCURRED);
 
-    // Installing removed packages again
-    if (!removed_pkges.empty()) {
-        printf("\nReinstalling removed packages...\n");
-        std::string reinstall_cmd = "sudo pacman -Sy --noconfirm ";
-        for (const auto& pkge : removed_pkges) {
-            reinstall_cmd += pkge + " ";
-        }
-        popen_exec(&reinstall_cmd);
-    }
+    
 
     printf("\n[FINISHED]. All conflicts and required packages processed.\n\n");
     printf("If any package was removed, it has been reinstalled.\n");
@@ -106,11 +127,13 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
         pkge_processed.clear();
 
     } else if (pkge_processed.count(packageName) > 0) {
-        printf("\n[PKGE(S) REQUIRE(S) TO BE REMOVED] >> %s%s\n\n", packageName.c_str());
+        printf("\n[PKGE(S) REQUIRE(S) TO BE REMOVED] >> %s\n\n", packageName.c_str());
 
         current_pkge_to_remove = packageName;
 
         remove_pkge = true;
+
+        std::this_thread::sleep_for(std::chrono::seconds(1));
 
         return PKGES_REQUIRED_TO_REMOVE;
 
@@ -153,6 +176,9 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
 
         } else if (std::regex_search(depends, pattern_rgx_requiredby)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_requiredby, IssueType::REQUIRED_BY);
+            if (remove_pkge) {
+                return CONTINUE_PROCESSING;
+            }
             pkge_processed.clear();
             return REQUIREDBY_RESOLVED;
 
@@ -175,11 +201,10 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
             pkge_processed.clear();
             return INSTALLED_PACKAGE;
 
-        }
-        else if (std::regex_search(depends, pattern_rgx_unknown_issue)) {
+        } /* else if (std::regex_search(depends, pattern_rgx_unknown_issue)) {
             printf("\n[UNKNOWN ISSUE] >> An unknown issue was detected in pacman output. Please check manually.\n");
             return ERROR_OCCURRED;
-        }
+        } */
     }
     else {
         printf("[EMPTY OUTPUT].\n");
@@ -245,16 +270,30 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                 break;
 
             case IssueType::REQUIRED_BY:
-                printf("[REQUIRED BY] >> %s required by %s\n\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
+                printf("\n[REQUIRED BY] >> %s required by %s\n\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
+                
                 do {
                     status = inspect_and_resolve_packages(findingMatches->str(2));
-                    if (remove_pkge) {
+                    
+                    if (status == PKGES_REQUIRED_TO_REMOVE) {
+                        return;
+                    }
+                    if (remove_pkge && (pkge_processed.count(findingMatches->str(2)) > 0)) {
+                        if (remove_package(findingMatches->str(2)) == "OK") {
+                            status = DONE;
+                            pkge_processed.erase(findingMatches->str(2));
+
+                        } else {
+                            printf("\n[FAILED TO REMOVE PACKAGE] >> %s\n", current_pkge_to_remove.c_str());
+                            exit(EXIT_FAILURE);
+                        }
+
                         if (findingMatches->str(2) == current_pkge_to_remove) {
-                            remove_package(current_pkge_to_remove);
-                            pkge_processed.erase(current_pkge_to_remove);
                             remove_pkge = false;
                             current_pkge_to_remove = "";
                         }
+                    } else {
+                        printf("\n[UNABLE TO REMOVE] >> %s\n", findingMatches->str(2).c_str());
                     }
                     
                 } while ((status != DONE) && (status != INSTALLED_PACKAGE) && (status != TARGET_NOT_FOUND_RESOLVED));
@@ -304,7 +343,7 @@ std::string remove_package(std::string packageName) {
 
     removed_pkges_requiredby.push_back(packageName);
 
-    printf("\n[CHECKING DEPENDENCIES FOR:] >> %s\n\n", packageName.c_str());
+    printf("\n[CHECKING DEPENDENCIES FOR] >> %s\n\n", packageName.c_str());
 
     std::string required_by_output = popen_exec(&clicommand);
     if (!std::regex_search(required_by_output, match, pattern_rgx_was_not_found)) {
@@ -321,7 +360,7 @@ std::string remove_package(std::string packageName) {
                 }
             } else {
                 printf("[REMOVING] >> No packages depending on: %s\n\n", packageName.c_str());
-                std::string rm_pkge = "sudo pacman -R --noconfirm 2>&1" + packageName;
+                std::string rm_pkge = "sudo pacman -R --noconfirm " + packageName + " 2>&1";
                 removed_pkges.push_back(packageName);
                 return popen_exec(&rm_pkge).c_str();
             }
