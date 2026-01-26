@@ -9,12 +9,22 @@
 #include <chrono>
 
 // Global variables
-std::set<std::string> pkge_processed;
-std::set<std::string> removed_pkges;
-std::string current_pkge_to_remove = "";
-bool remove_pkge = false;
+std::set<std::string> pkge_processed; // To keep track of processed packages. It avoids infinite loops and helps removing necessary packages in order.
+std::set<std::string> removed_pkges; // To keep track of removed packages for reinstallation later.
+std::string current_pkge_to_remove = ""; // To keep track of the current package to remove when dependencies are found.
+bool remove_pkge = false; // Flag to indicate if a package needs to be removed.
 
 // Regex patterns
+/*
+ * Pattern explanations:
+ * 1. Conflict between two packages: "packageA and packageB are in conflict"
+ * 2. Package required by another: "packageA required by packageB"
+ * 3. File conflict: "path/to/file exists in filesystem (owned by packageA)"
+ * 4. Package up to date: "is up to date --- reinstalling"
+ * 5. Target not found: "target not found: packageA"
+ * 6. Package was not found: "package 'packageA' was not found"
+ * 7. Nothing to fix: "there is nothing to do". When no conflicts or issues are found. 
+ */
 std::regex pattern_rgx_conflict(R"((?!.*\[y/N\])(\S+)\s+and\s+(\S+) are in conflict)");
 std::regex pattern_rgx_requiredby(R"((\S+)\s+required by\s+(\S+))");
 std::regex pattern_rgx_conflict_files(R"((\S+):\s(\S+)\s+exists in filesystem \(owned by)");
@@ -34,6 +44,7 @@ enum class IssueType {
     UNKNOWN
 };
 
+// Enum for proceedure status
 enum ProceedureStatus {
     NOTHING_TO_DO = 0,
     CONFLICTS_RESOLVED = 1,
@@ -49,12 +60,13 @@ enum ProceedureStatus {
 
 
 // Function declarations
-ProceedureStatus inspect_and_resolve_packages(std::string packageName);
-std::string popen_exec(const std::string* clicommand);
-void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, IssueType isstype);
-std::string remove_package(std::string packageName);
+ProceedureStatus inspect_and_resolve_packages(std::string packageName); // Main function to inspect and resolve packages
+std::string popen_exec(const std::string* clicommand); // Function to execute a command and return its output
+void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, IssueType isstype); // Function to inspect regex matches and resolve issues
+std::string remove_package(std::string packageName); // Function to remove a package and its dependents
 
 
+// Main function
 int main(int argc, char *argv[]) {
 
     ProceedureStatus status;
@@ -67,6 +79,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    // Checking if --fix flag is used, otherwise using the package name provided
     if (std::string(argv[1]) == "--fix") {
         commandline_input = "--fix";
     } else {
@@ -75,14 +88,22 @@ int main(int argc, char *argv[]) {
 
     printf("\nRunning pacman to see packages in conflict...:\n\n");
 
+
+    // Main loop to inspect and resolve packages and reinstall removed packages
+    // It continues until there are no more conflicts or an error occurs
     do {
-        // Reinstalling removed packages
+        // Reinstalling removed packages. If any package was removed, it will be reinstalled here.
+        // Some packages might need to be re-removed if they are still causing conflicts.
+        // This is done before inspecting packages again to ensure all dependencies are met.
+        // Some other packages might not be possible to reinstall if they were removed due to being not found in the repositories.
         if (!removed_pkges.empty()) {
             printf("\nReinstalling removed packages...\n");
 
             std::string get_pgkes_info;
             std::set<std::string> pkges_to_skip;
 
+            // Checking if any removed package was not found in the repositories
+            // to avoid reinstalling it and causing errors
             for (const auto& pkge : removed_pkges) {
                 get_pgkes_info = "pacman -Si " + pkge + " 2>&1";
                 if (std::regex_search(popen_exec(&get_pgkes_info), pattern_rgx_was_not_found)) {
@@ -120,13 +141,14 @@ int main(int argc, char *argv[]) {
 }
 
 
+// Function to inspect and resolve packages based on the provided packagename
 ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
 
     // Variables 
-    std::string depends;
-    std::string clicommand;
-    std::vector<std::string> pkges;
-    std::vector<std::string> general_or_package = {"-Syv", "-Syuv"}; // first for required by, second for conflicts
+    std::string depends; // To store the output of the pacman command
+    std::string clicommand; // To store the command to be executed
+    std::vector<std::string> pkges; // To store packages found in the output
+    std::vector<std::string> general_or_package = {"-Syv", "-Syuv"}; // General command or package specific command
 
     // Removing package if already processed
     if (packageName == "--fix") {
@@ -135,20 +157,18 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
     } else if (pkge_processed.count(packageName) > 0) {
         printf("\n[PKGE(S) REQUIRE(S) TO BE REMOVED] >> %s\nPrevious PKGES might need to be removed first.\n", packageName.c_str());
 
-        current_pkge_to_remove = packageName;
+        current_pkge_to_remove = packageName; // Setting current package to remove
 
         remove_pkge = true;
-
-        std::this_thread::sleep_for(std::chrono::seconds(1));
 
         return PKGES_REQUIRED_TO_REMOVE;
 
     } else {
-        pkge_processed.insert(packageName);
+        // Marking package as processed to avoid infinite loops and removing them later if needed
+        pkge_processed.insert(packageName); 
     }
 
     // Putting together the string command line
-    
     if (packageName.find("--fix") != std::string::npos) {
         printf("\n[RESOLVING ALL CONFLICTS AUTOMATICALLY]\n\n");
         clicommand = "sudo pacman ";
@@ -167,14 +187,19 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
     
     depends = popen_exec(&clicommand);
 
+    // Analyzing the output for conflicts or issues
 	if (!depends.empty()){
 
+        // Checking for different issues using regex patterns
+        // Conflict between packages
         if (std::regex_search(depends, pattern_rgx_conflict)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_conflict, IssueType::CONFLICT);
             pkge_processed.clear();
             return CONFLICTS_RESOLVED;
 
-        } else if (std::regex_search(depends, pattern_rgx_requiredby)) {
+        } 
+        // Package required by another
+        else if (std::regex_search(depends, pattern_rgx_requiredby)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_requiredby, IssueType::REQUIRED_BY);
             if (remove_pkge) {
                 return CONTINUE_PROCESSING;
@@ -182,21 +207,29 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
             pkge_processed.clear();
             return REQUIREDBY_RESOLVED;
 
-        } else if (std::regex_search(depends, pattern_rgx_conflict_files)) {
+        } 
+        // File conflicts
+        else if (std::regex_search(depends, pattern_rgx_conflict_files)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_conflict_files, IssueType::CONFLICT_FILES);
             pkge_processed.clear();
             return FILE_CONFLICTS_RESOLVED;
 
-        } else if (std::regex_search(depends, pattern_rgx_target_not_found)) {
+        } 
+        // Target not found. They might need to be removed.
+        else if (std::regex_search(depends, pattern_rgx_target_not_found)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_target_not_found, IssueType::TARGET_NOT_FOUND);
             return TARGET_NOT_FOUND_RESOLVED;
 
-        } else if (std::regex_search(depends, pattern_rgx_nothing_to_fix)) {
+        } 
+        // Nothing to fix
+        else if (std::regex_search(depends, pattern_rgx_nothing_to_fix)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_nothing_to_fix, IssueType::NOTHING_TO_FIX);
             pkge_processed.clear();
             return NOTHING_TO_DO;
 
-        } else if (std::regex_search(depends, pattern_rgx_up_to_date)) {
+        } 
+        // Package is already installed and up to date
+        else if (std::regex_search(depends, pattern_rgx_up_to_date)) {
             printf("\n[UP TO DATE] >> %s is already installed and up to date.\n", packageName.c_str());
             pkge_processed.clear();
             return INSTALLED_PACKAGE;
@@ -205,13 +238,16 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
     }
     else {
         printf("[EMPTY OUTPUT].\n");
-    }    
+    }   
+    
+    // Final done message. If reached here, means no issues were found.
     printf("\n[DONE]\n\n");
     pkge_processed.clear();
     return DONE;
 }
 
 
+// Function to execute a command and return its output as a string
 std::string popen_exec(const std::string* clicommand) {
     // Executing the string command line
     // std::cout << "\n[COMMAND]: " << clicommand.c_str() << "\n";
@@ -238,6 +274,7 @@ std::string popen_exec(const std::string* clicommand) {
         return "";
     }
 
+    // Getting exit code from status
     int output_exit_code = WEXITSTATUS(output_status);
     if (output_exit_code != 0) {
         // std::cerr << "Command faild with exit code: " << output_exit_code << std::endl;
@@ -249,28 +286,40 @@ std::string popen_exec(const std::string* clicommand) {
     return output_cli;
 }
 
+
+// Function to inspect regex matches and resolve issues based on issue type
 void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, IssueType isstype) {
 
-    std::string remove_pkge_output;
-    ProceedureStatus proceedure_status;
-    std::sregex_iterator findingMatches(depends->begin(), depends->end(), *pattern_rgx);
-    std::sregex_iterator end;
+    std::string remove_pkge_output; // To store output of remove package function
+    ProceedureStatus proceedure_status; // To store status of the proceedure
+    ProceedureStatus status;
+    std::sregex_iterator findingMatches(depends->begin(), depends->end(), *pattern_rgx); // Iterator to find regex matches
+    std::sregex_iterator end; // End iterator
 
+    // Looping through all matches found.
+    // Each match is handled based on the issue type.
     while (findingMatches != end){
         switch (isstype) {
+
+            // Conflict between packages
             case IssueType::CONFLICT:
                 printf("\n[CONFLICT BETWEEN] >> %s and %s\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
-                ProceedureStatus status;
+                // This loop continues until the conflict is resolved or a package is installed or target not found is resolved
                 do {
                     status = inspect_and_resolve_packages(findingMatches->str(1));
                     
                 } while ((status != DONE) && (status != INSTALLED_PACKAGE) && (status != TARGET_NOT_FOUND_RESOLVED));
                 break;
 
+            // Package required by another
             case IssueType::REQUIRED_BY:
                 printf("\n[REQUIRED BY] >> %s required by %s\n\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
                 
+                // Trying to resolve the required by issue.
+                // It attempts to inspect and resolve the required package by updating, removing, or reinstalling it.
                 for (int attempt = 0; attempt < 2; ++attempt) {
+
+                    //
                     if (removed_pkges.count(findingMatches->str(2)) == 0) {
                         status = inspect_and_resolve_packages(findingMatches->str(2));
 
