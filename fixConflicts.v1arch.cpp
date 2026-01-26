@@ -10,7 +10,7 @@
 
 // Global variables
 std::set<std::string> pkge_processed;
-std::vector<std::string> removed_pkges;
+std::set<std::string> removed_pkges;
 std::string current_pkge_to_remove = "";
 bool remove_pkge = false;
 
@@ -80,14 +80,19 @@ int main(int argc, char *argv[]) {
         if (!removed_pkges.empty()) {
             printf("\nReinstalling removed packages...\n");
 
-            std::string get_pgkes_info = "pacman -Qi ";
+            std::string get_pgkes_info;
+            std::set<std::string> pkges_to_skip;
 
             for (const auto& pkge : removed_pkges) {
-                get_pgkes_info += pkge;
+                get_pgkes_info = "pacman -Si " + pkge + " 2>&1";
                 if (std::regex_search(popen_exec(&get_pgkes_info), pattern_rgx_was_not_found)) {
                     printf("[PACKAGE NOT FOUND] >> %s was not found in the repositories. Skipping reinstall.\n", pkge.c_str());
-                    removed_pkges.erase(std::find(removed_pkges.begin(), removed_pkges.end(), pkge));
+                    pkges_to_skip.insert(pkge);
                 }
+            }
+
+            for (const auto& pkge : pkges_to_skip) {
+                removed_pkges.erase(pkge);
             }
 
             std::string reinstall_cmd = "sudo pacman -Sy --noconfirm ";
@@ -95,15 +100,16 @@ int main(int argc, char *argv[]) {
                 reinstall_cmd += pkge + " ";
             }
 
+            printf("\n[REINSTALLING] >> %s\n\n", reinstall_cmd.c_str());
             popen_exec(&reinstall_cmd);
+            removed_pkges.clear();
+            printf("\n[REINSTALLATION DONE]\n\n");
 
         }
 
         status = inspect_and_resolve_packages("--fix");
 
     } while (status != NOTHING_TO_DO && status != ERROR_OCCURRED);
-
-    
 
     printf("\n[FINISHED]. All conflicts and required packages processed.\n\n");
     printf("If any package was removed, it has been reinstalled.\n");
@@ -127,7 +133,7 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
         pkge_processed.clear();
 
     } else if (pkge_processed.count(packageName) > 0) {
-        printf("\n[PKGE(S) REQUIRE(S) TO BE REMOVED] >> %s\n\n", packageName.c_str());
+        printf("\n[PKGE(S) REQUIRE(S) TO BE REMOVED] >> %s\nPrevious PKGES might need to be removed first.\n", packageName.c_str());
 
         current_pkge_to_remove = packageName;
 
@@ -136,12 +142,6 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
         return PKGES_REQUIRED_TO_REMOVE;
-
-        /* remove_package(packageName);
-
-        pkge_processed.clear();
-        
-        return DONE; */
 
     } else {
         pkge_processed.insert(packageName);
@@ -201,10 +201,7 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
             pkge_processed.clear();
             return INSTALLED_PACKAGE;
 
-        } /* else if (std::regex_search(depends, pattern_rgx_unknown_issue)) {
-            printf("\n[UNKNOWN ISSUE] >> An unknown issue was detected in pacman output. Please check manually.\n");
-            return ERROR_OCCURRED;
-        } */
+        }
     }
     else {
         printf("[EMPTY OUTPUT].\n");
@@ -254,6 +251,7 @@ std::string popen_exec(const std::string* clicommand) {
 
 void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, IssueType isstype) {
 
+    std::string remove_pkge_output;
     ProceedureStatus proceedure_status;
     std::sregex_iterator findingMatches(depends->begin(), depends->end(), *pattern_rgx);
     std::sregex_iterator end;
@@ -272,31 +270,57 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
             case IssueType::REQUIRED_BY:
                 printf("\n[REQUIRED BY] >> %s required by %s\n\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
                 
-                do {
-                    status = inspect_and_resolve_packages(findingMatches->str(2));
-                    
-                    if (status == PKGES_REQUIRED_TO_REMOVE) {
-                        return;
-                    }
-                    if (remove_pkge && (pkge_processed.count(findingMatches->str(2)) > 0)) {
-                        if (remove_package(findingMatches->str(2)) == "OK") {
-                            status = DONE;
-                            pkge_processed.erase(findingMatches->str(2));
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    if (removed_pkges.count(findingMatches->str(2)) == 0) {
+                        status = inspect_and_resolve_packages(findingMatches->str(2));
 
-                        } else {
-                            printf("\n[FAILED TO REMOVE PACKAGE] >> %s\n", current_pkge_to_remove.c_str());
-                            exit(EXIT_FAILURE);
+                        if (status == DONE || status == TARGET_NOT_FOUND_RESOLVED) {
+                            break;
+                        }
+                        
+                        if (status == PKGES_REQUIRED_TO_REMOVE) {
+                            return;
+                        }
+                        if (remove_pkge && (pkge_processed.count(findingMatches->str(2)) > 0)) {
+
+                            remove_pkge_output = remove_package(findingMatches->str(2));
+
+                            if (remove_pkge_output == "OK") {
+                                status = DONE;
+                                pkge_processed.erase(findingMatches->str(2));
+
+                            } else if (remove_pkge_output == "ERROR") {
+                                printf("\n[FAILED REMOVING PACKAGE] >> %s\n", current_pkge_to_remove.c_str());
+                                exit(EXIT_FAILURE);
+                            }
+
+                            if (findingMatches->str(2) == current_pkge_to_remove) {
+                                remove_pkge = false;
+                                current_pkge_to_remove = "";
+                            }
                         }
 
-                        if (findingMatches->str(2) == current_pkge_to_remove) {
-                            remove_pkge = false;
-                            current_pkge_to_remove = "";
-                        }
                     } else {
-                        printf("\n[UNABLE TO REMOVE] >> %s\n", findingMatches->str(2).c_str());
+                        status = DONE;
+                        break;
                     }
-                    
-                } while ((status != DONE) && (status != INSTALLED_PACKAGE) && (status != TARGET_NOT_FOUND_RESOLVED));
+                } 
+                switch (status) {
+                    case DONE:
+                        printf("\n[REQUIRED BY RESOLVED] >> %s required by %s has been resolved.\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
+                        break;
+
+                    case INSTALLED_PACKAGE:
+                        printf("\n[INSTALLED PACKAGE] >> %s is already installed.\n", findingMatches->str(2).c_str());
+                        break;
+
+                    case TARGET_NOT_FOUND_RESOLVED:
+                        printf("\n[TARGET NOT FOUND RESOLVED] >> %s was not found and has been handled.\n", findingMatches->str(2).c_str());
+                        break;
+
+                    default:
+                        break;
+                }
                 break;
 
             case IssueType::CONFLICT_FILES:
@@ -340,6 +364,7 @@ std::string remove_package(std::string packageName) {
     std::smatch match;
     std::string clicommand = "pacman -Qi " + packageName + " 2>&1";
     std::vector<std::string> removed_pkges_requiredby;
+    std::string rm_pkge_output;
 
     removed_pkges_requiredby.push_back(packageName);
 
@@ -361,8 +386,16 @@ std::string remove_package(std::string packageName) {
             } else {
                 printf("[REMOVING] >> No packages depending on: %s\n\n", packageName.c_str());
                 std::string rm_pkge = "sudo pacman -R --noconfirm " + packageName + " 2>&1";
-                removed_pkges.push_back(packageName);
-                return popen_exec(&rm_pkge).c_str();
+                removed_pkges.insert(packageName);
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    rm_pkge_output = popen_exec(&rm_pkge);
+                }
+                if (std::regex_search(rm_pkge_output, match, pattern_rgx_target_not_found)) {
+                    printf("\n[PACKAGE UNINSTALLED] >> %s \n\n", packageName.c_str());
+                    return "OK";
+                } else {
+                    return "ERROR";
+                }
             }
         }
 
