@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Daniel Arango (github: cshdev110)
+
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -5,8 +8,21 @@
 #include <set>
 #include <algorithm>
 
-#include <thread>
-#include <chrono>
+/* 
+    * This program is designed to automatically resolve package conflicts for a full offline installation of BlackArch Linux.
+    * Issue this program in a fresh installation. (Recomended)
+    * Background:
+    * After installing BlackArch full from the ISO (in VirtualBox, VMware, and virt-manager) and trying to update, it ended failing.
+    * After installing BlackArch full from ISO choosing online type installation (in VirtualBox, VMware, and virt-manager), it also ended failing having a unresponsive desktop,
+    * that only allows to manage fluxbox features.
+    * This program uses pacman to identify conflicts and required by packages, and used recursion to resolve them.
+    * It goes recursively updating/removing/reinstalling packages until all conflicts are resolved.
+    * When packages are needed to be removed to resolve conflicts, they are stored in a set and reinstalled later.
+    * 
+    * Author: Daniel Arango (github: cshdev110)
+    * Date: Jan 2026
+    * 
+ */
 
 // Global variables
 std::set<std::string> pkge_processed; // To keep track of processed packages. It avoids infinite loops and helps removing necessary packages in order.
@@ -27,7 +43,7 @@ bool remove_pkge = false; // Flag to indicate if a package needs to be removed.
  */
 std::regex pattern_rgx_conflict(R"((?!.*\[y/N\])(\S+)\s+and\s+(\S+) are in conflict)");
 std::regex pattern_rgx_requiredby(R"((\S+)\s+required by\s+(\S+))");
-std::regex pattern_rgx_conflict_files(R"((\S+):\s(\S+)\s+exists in filesystem \(owned by)");
+//std::regex pattern_rgx_conflict_files(R"((\S+):\s(\S+)\s+exists in filesystem \(owned by)");
 std::regex pattern_rgx_up_to_date(R"(\s*is up to date\s*-+\s*reinstalling)");
 std::regex pattern_rgx_target_not_found(R"(\s*target not found:\s+(\S+))");
 std::regex pattern_rgx_was_not_found(R"(\s+package '(\S+)' was not found)");
@@ -38,7 +54,7 @@ std::regex pattern_rgx_nothing_to_fix(R"(.*there is nothing to do.*)");
 enum class IssueType {
     CONFLICT,
     REQUIRED_BY,
-    CONFLICT_FILES,
+    // CONFLICT_FILES,
     TARGET_NOT_FOUND,
     NOTHING_TO_FIX,
     UNKNOWN
@@ -49,7 +65,7 @@ enum ProceedureStatus {
     NOTHING_TO_DO = 0,
     CONFLICTS_RESOLVED = 1,
     REQUIREDBY_RESOLVED = 2,
-    FILE_CONFLICTS_RESOLVED = 3,
+    // FILE_CONFLICTS_RESOLVED = 3,
     TARGET_NOT_FOUND_RESOLVED = 4,
     INSTALLED_PACKAGE = 5,
     PKGES_REQUIRED_TO_REMOVE = 6,
@@ -134,8 +150,9 @@ int main(int argc, char *argv[]) {
 
     printf("\n[FINISHED]. All conflicts and required packages processed.\n\n");
     printf("If any package was removed, it has been reinstalled.\n");
-    printf("You may want to run 'sudo pacman -Syu' to ensure system is up to date.\n");
     printf("Execute the program again if there are still conflicts.\n\n");
+    printf("[YOU MIGHT WANT TO EXECUTE pacman -Syu --needed --overwrite=/*]");
+    printf("[OR pacman -Syu --needed blackarch --overwrite=/* to install all tools]\n\n");
 
     return 0;
 }
@@ -174,7 +191,7 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
         clicommand = "sudo pacman ";
         clicommand += general_or_package[1]; // "Syuv"
         clicommand += " ";
-        clicommand += "--noconfirm";
+        clicommand += "--needed --noconfirm --overwrite=/*"; // To overwrite all files causing conflicts
 
     } else {
         printf("\n[RESOLVING FOR] >> %s\n\n", packageName.c_str());
@@ -208,13 +225,13 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
             return REQUIREDBY_RESOLVED;
 
         } 
-        // File conflicts
+        /* // File conflicts
         else if (std::regex_search(depends, pattern_rgx_conflict_files)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_conflict_files, IssueType::CONFLICT_FILES);
             pkge_processed.clear();
             return FILE_CONFLICTS_RESOLVED;
 
-        } 
+        }  */
         // Target not found. They might need to be removed.
         else if (std::regex_search(depends, pattern_rgx_target_not_found)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_target_not_found, IssueType::TARGET_NOT_FOUND);
@@ -298,6 +315,7 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
 
     // Looping through all matches found.
     // Each match is handled based on the issue type.
+    // As conflicts might have multiple required by packages, all matches are processed via this loop.
     while (findingMatches != end){
         switch (isstype) {
 
@@ -317,6 +335,8 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                 
                 // Trying to resolve the required by issue.
                 // It attempts to inspect and resolve the required package by updating, removing, or reinstalling it.
+                // The loop means: first attempt to resolve the required package normally.
+                // if there is a problem, it will solve it in the recursion before coming back and check if it is resolved.
                 for (int attempt = 0; attempt < 2; ++attempt) {
 
                     //
@@ -327,9 +347,20 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                             break;
                         }
                         
+                        // This status indicates that the package has already processed and needs to be removed.
+                        // And because of that, we return in the recursion to handle previous packages first
+                        // before reaching this one again.
+                        // When a package is already processed, it means that it has been inspected and needs to be removed
+                        // before ending in a infinite loop. However, the removed packages are stored in a set and reinstalled later.
+                        // This way, we ensure that all dependencies are met and conflicts are resolved in the correct order.
+                        // After the main package that generated the conflicts is resolved, all removed packages are reinstalled.
                         if (status == PKGES_REQUIRED_TO_REMOVE) {
                             return;
                         }
+                        // When a packages is already processed, it is marked for removal and previous packages are handled first.
+                        // This make the remove_pkge flag to be set to true.
+                        // So, with remove_pkge being true and making sure that the package exists in the pkge_processed set,
+                        // we proceed to remove the package.
                         if (remove_pkge && (pkge_processed.count(findingMatches->str(2)) > 0)) {
 
                             remove_pkge_output = remove_package(findingMatches->str(2));
@@ -343,6 +374,10 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                                 exit(EXIT_FAILURE);
                             }
 
+                            // Here, the first processed package that triggers the removal is handled
+                            // and the flag is reset to false to avoid removing other packages unintentionally.
+                            // This allows the main package to that generated the conflicts to be resolved,
+                            // and then the removed packages are reinstalled later without any issues.
                             if (findingMatches->str(2) == current_pkge_to_remove) {
                                 remove_pkge = false;
                                 current_pkge_to_remove = "";
@@ -372,7 +407,7 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                 }
                 break;
 
-            case IssueType::CONFLICT_FILES:
+            /* case IssueType::CONFLICT_FILES:
                 // str(2) is the file path
                 printf("\n[CONFLICT FILES] >> %s exists in filesystem\n", findingMatches->str(2).c_str());
                 printf("[REMOVING FILE] >> %s\n", findingMatches->str(1).c_str());
@@ -383,8 +418,9 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                     popen_exec(&removeFileCmd);
                 }
 
-                break;
+                break; */
 
+            // If target not found in repositories, remove the package
             case IssueType::TARGET_NOT_FOUND:
                 {
                     printf("\n[TARGET NOT FOUND] >> %s - Desinstalling...\n", findingMatches->str(1).c_str());
@@ -396,6 +432,7 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                     break;
                 }
 
+            // When the full update finishes without issues
             case IssueType::NOTHING_TO_FIX:
                 printf("\n[DONE]\n");
                 break;
@@ -408,26 +445,35 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
 }
 
 
+// Function to remove a package and its dependents
 std::string remove_package(std::string packageName) {
-    std::regex pattern_rgx_removing(R"(Required By\s+:\s+(.+))");
+    std::regex pattern_rgx_removing(R"(Required By\s+:\s+(.+))"); // To capture packages that require the target package
     std::smatch match;
-    std::string clicommand = "pacman -Qi " + packageName + " 2>&1";
-    std::vector<std::string> removed_pkges_requiredby;
+    std::string clicommand = "pacman -Qi " + packageName + " 2>&1"; // Command to get package info
+    std::vector<std::string> removed_pkges_requiredby; // To store 
     std::string rm_pkge_output;
 
     removed_pkges_requiredby.push_back(packageName);
 
     printf("\n[CHECKING DEPENDENCIES FOR] >> %s\n\n", packageName.c_str());
 
-    std::string required_by_output = popen_exec(&clicommand);
+    std::string required_by_output = popen_exec(&clicommand); // Getting package info
+
+    // Checking if package is installed, if not, return NOT_INSTALLED
     if (!std::regex_search(required_by_output, match, pattern_rgx_was_not_found)) {
+
+        // Checking for packages that require the target package being removed
         if (std::regex_search(required_by_output, match, pattern_rgx_removing)) {
 
-            std::string required_by = match.str(1);
+            std::string required_by = match.str(1); // Getting the required by packages
 
+            // If there are packages depending on the target package, add them to the list for removal
+            // These packages will be removed first before removing the target package
+            // although they will be reinstalled later
             if (required_by != "None") {
                 std::istringstream iss(required_by);
                 std::string word;
+                // Splitting the required by string into individual package names
                 while (iss >> word) {
                     removed_pkges_requiredby.push_back(word);
                     printf("**** Marking package for removal: %s\n\n", word.c_str());
@@ -435,7 +481,9 @@ std::string remove_package(std::string packageName) {
             } else {
                 printf("[REMOVING] >> No packages depending on: %s\n\n", packageName.c_str());
                 std::string rm_pkge = "sudo pacman -R --noconfirm " + packageName + " 2>&1";
-                removed_pkges.insert(packageName);
+
+                removed_pkges.insert(packageName); // Adding package to removed packages set for reinstallation later
+
                 for (int attempt = 0; attempt < 2; ++attempt) {
                     rm_pkge_output = popen_exec(&rm_pkge);
                 }
@@ -449,7 +497,8 @@ std::string remove_package(std::string packageName) {
         }
 
         if (removed_pkges_requiredby.size() > 1) {
-            // Reverse the order to remove dependents first
+            // Reverse the order to remove dependents first before the target package
+            // Using std::reverse from <algorithm>
             std::reverse(removed_pkges_requiredby.begin(), removed_pkges_requiredby.end());
         }
         
