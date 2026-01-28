@@ -99,6 +99,7 @@ int main(int argc, char *argv[]) {
 
     ProceedureStatus status;
     std::string commandline_input;
+    std::string file_log_name;
 
     // Sanitizing input
     if (argc > 2 || argc < 2 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
@@ -116,6 +117,16 @@ int main(int argc, char *argv[]) {
 
     printf("\nRunning pacman to see packages in conflict...:\n\n");
 
+    // Checking if the file log already exists to backup it
+    // It creates a new log file with an incremented number at every execution
+    for (int num_file_logs = 1; ; ++num_file_logs) {
+        file_log_name = "fixConflicts_" + std::to_string(num_file_logs) + ".log";
+        FILE *file_check = fopen(file_log_name.c_str(), "r");
+        if (!file_check) {
+            break;
+        }
+        fclose(file_check);
+    }
 
     // Main loop to inspect and resolve packages and reinstall removed packages
     // It continues until there are no more conflicts or an error occurs
@@ -160,7 +171,7 @@ int main(int argc, char *argv[]) {
         }
 
         // Update Write log file
-        write_log_file("fixConflicts.log");
+        write_log_file(file_log_name.c_str());
         
         status = inspect_and_resolve_packages("--fix");
 

@@ -37,9 +37,9 @@ This workaround automates the process, saving hours of manual troubleshooting.
 - **Dependencies**: Standard C++ libraries (regex, set, algorithm)
 
 ## 🔨 Compilation
-
+Compilate it in the BA Linux fresh iso installation.
 ```bash
-g++ -std=c++17 -g fixConflicts.v1arch.cpp -o fixConflicts
+g++ fixConflicts.v1arch.cpp -o fixConflicts
 ```
 
 ## 💻 Usage
