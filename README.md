@@ -62,6 +62,21 @@ The tool provides detailed logging:
 - `[REINSTALLING]` - Packages being reinstalled after resolution
 - `[DONE]` - Conflict resolution complete
 
+
+### Logging:
+The tool generates a `fixConflicts.log` file in the working directory containing:
+- **Packages removed and reinstalled** - Successfully removed packages that were reinstalled
+- **Packages removed but not reinstalled** - Packages not found in repositories (couldn't be reinstalled)
+- **Packages in conflict and resolved** - Packages that were conflicting
+- **Packages required-by and resolved** - Packages needed by others that were handled
+- **Packages not found in repos** - Packages unavailable for reinstallation
+- **Dependencies unsatisfied as not found in repos** - Packages unable to upgrade as dependency(ies) not found in repos
+
+Check the log after execution:
+```bash
+cat fixConflicts.log
+```
+
 ## ⚠️ Important Warnings
 
 **Use at your own risk!** This tool:
@@ -97,7 +112,8 @@ The tool provides detailed logging:
 .
 ├── fixConflicts.v1arch.cpp  # Main source code
 ├── README.md                # This file
-└── LICENSE                  # MIT License
+├── LICENSE                  # MIT License
+└── fixConflicts.log         # Generated
 ```
 
 ## 🐛 Known Issues & Limitations
@@ -120,7 +136,7 @@ Copyright (c) 2026 Daniel Arango
 
 **Daniel Arango** ([@cshdev110](https://github.com/cshdev110))
 
-Created to solve persistent update conflicts in BlackArch installations.
+Created to solve conflicts in a fresh full ISO BlackArch installations.
 
 ## 🙏 Acknowledgments
 

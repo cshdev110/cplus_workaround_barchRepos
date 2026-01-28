@@ -30,6 +30,14 @@ std::set<std::string> removed_pkges; // To keep track of removed packages for re
 std::string current_pkge_to_remove = ""; // To keep track of the current package to remove when dependencies are found.
 bool remove_pkge = false; // Flag to indicate if a package needs to be removed.
 
+// Logging tracking structures
+std::set<std::string> log_removed_reinstalled; // Packages removed and reinstalled
+std::set<std::string> log_removed_not_reinstalled; // Packages removed but not reinstalled
+std::set<std::string> log_conflicts_resolved; // Packages in conflict that were resolved
+std::set<std::string> log_requiredby_resolved; // Packages required-by that were resolved
+std::set<std::string> log_not_found_in_repos; // Packages not found in repos
+std::set<std::string> log_dependency_unsatisfy_removed; // Packages removed due to unsatisfied dependencies
+
 // Regex patterns
 /*
  * Pattern explanations:
@@ -47,6 +55,7 @@ std::regex pattern_rgx_requiredby(R"((\S+)\s+required by\s+(\S+))");
 std::regex pattern_rgx_up_to_date(R"(\s*is up to date\s*-+\s*reinstalling)");
 std::regex pattern_rgx_target_not_found(R"(\s*target not found:\s+(\S+))");
 std::regex pattern_rgx_was_not_found(R"(\s+package '(\S+)' was not found)");
+std::regex pattern_rgx_unable_to_satisfy_depen(R"(unable to satisfy dependency '(\S+)' required by\s+(\S+))");
 std::regex pattern_rgx_nothing_to_fix(R"(.*there is nothing to do.*)");
 // std::regex pattern_rgx_unknown_issue(R"(error:)");
 
@@ -56,22 +65,24 @@ enum class IssueType {
     REQUIRED_BY,
     // CONFLICT_FILES,
     TARGET_NOT_FOUND,
+    DEPENDENCY_UNSATISFY,
     NOTHING_TO_FIX,
     UNKNOWN
 };
 
 // Enum for proceedure status
 enum ProceedureStatus {
-    NOTHING_TO_DO = 0,
-    CONFLICTS_RESOLVED = 1,
-    REQUIREDBY_RESOLVED = 2,
-    // FILE_CONFLICTS_RESOLVED = 3,
-    TARGET_NOT_FOUND_RESOLVED = 4,
-    INSTALLED_PACKAGE = 5,
-    PKGES_REQUIRED_TO_REMOVE = 6,
-    CONTINUE_PROCESSING = 7,
-    DONE = 8,
-    ERROR_OCCURRED = -1
+    NOTHING_TO_DO,
+    CONFLICTS_RESOLVED,
+    REQUIREDBY_RESOLVED,
+    // FILE_CONFLICTS_RESOLVED,
+    TARGET_NOT_FOUND_RESOLVED,
+    DEPENDENCY_UNSATISFY_RESOLVED,
+    INSTALLED_PACKAGE,
+    PKGES_REQUIRED_TO_REMOVE,
+    CONTINUE_PROCESSING,
+    DONE,
+    ERROR_OCCURRED 
 };
 
 
@@ -80,6 +91,7 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName); // Main 
 std::string popen_exec(const std::string* clicommand); // Function to execute a command and return its output
 void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, IssueType isstype); // Function to inspect regex matches and resolve issues
 std::string remove_package(std::string packageName); // Function to remove a package and its dependents
+void write_log_file(const std::string& filename); // Function to write log file with all tracked actions
 
 
 // Main function
@@ -125,16 +137,19 @@ int main(int argc, char *argv[]) {
                 if (std::regex_search(popen_exec(&get_pgkes_info), pattern_rgx_was_not_found)) {
                     printf("[PACKAGE NOT FOUND] >> %s was not found in the repositories. Skipping reinstall.\n", pkge.c_str());
                     pkges_to_skip.insert(pkge);
+                    log_not_found_in_repos.insert(pkge);
                 }
             }
 
             for (const auto& pkge : pkges_to_skip) {
                 removed_pkges.erase(pkge);
+                log_removed_not_reinstalled.insert(pkge);
             }
 
             std::string reinstall_cmd = "sudo pacman -Sy --noconfirm ";
             for (const auto& pkge : removed_pkges) {
                 reinstall_cmd += pkge + " ";
+                log_removed_reinstalled.insert(pkge);
             }
 
             printf("\n[REINSTALLING] >> %s\n\n", reinstall_cmd.c_str());
@@ -144,6 +159,9 @@ int main(int argc, char *argv[]) {
 
         }
 
+        // Update Write log file
+        write_log_file("fixConflicts.log");
+        
         status = inspect_and_resolve_packages("--fix");
 
     } while (status != NOTHING_TO_DO && status != ERROR_OCCURRED);
@@ -151,7 +169,7 @@ int main(int argc, char *argv[]) {
     printf("\n[FINISHED]. All conflicts and required packages processed.\n\n");
     printf("If any package was removed, it has been reinstalled.\n");
     printf("Execute the program again if there are still conflicts.\n\n");
-    printf("[YOU MIGHT WANT TO EXECUTE pacman -Syu --needed --overwrite=/*]");
+    printf("[YOU MIGHT WANT TO EXECUTE pacman -Syu --needed --overwrite=/*]\n");
     printf("[OR pacman -Syu --needed blackarch --overwrite=/* to install all tools]\n\n");
 
     return 0;
@@ -216,7 +234,7 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
 
         } 
         // Package required by another
-        else if (std::regex_search(depends, pattern_rgx_requiredby)) {
+        else if (std::regex_search(depends, pattern_rgx_requiredby) && !std::regex_search(depends, pattern_rgx_unable_to_satisfy_depen)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_requiredby, IssueType::REQUIRED_BY);
             if (remove_pkge) {
                 return CONTINUE_PROCESSING;
@@ -238,6 +256,13 @@ ProceedureStatus inspect_and_resolve_packages(std::string packageName) {
             return TARGET_NOT_FOUND_RESOLVED;
 
         } 
+        // Unable to satisfy dependency
+        else if (std::regex_search(depends, pattern_rgx_unable_to_satisfy_depen)) {
+            inspect_regex_and_resolve(&depends, &pattern_rgx_unable_to_satisfy_depen, IssueType::DEPENDENCY_UNSATISFY);
+            pkge_processed.clear();
+            return REQUIREDBY_RESOLVED;
+
+        }
         // Nothing to fix
         else if (std::regex_search(depends, pattern_rgx_nothing_to_fix)) {
             inspect_regex_and_resolve(&depends, &pattern_rgx_nothing_to_fix, IssueType::NOTHING_TO_FIX);
@@ -322,11 +347,16 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
             // Conflict between packages
             case IssueType::CONFLICT:
                 printf("\n[CONFLICT BETWEEN] >> %s and %s\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
+                
                 // This loop continues until the conflict is resolved or a package is installed or target not found is resolved
                 do {
                     status = inspect_and_resolve_packages(findingMatches->str(1));
                     
                 } while ((status != DONE) && (status != INSTALLED_PACKAGE) && (status != TARGET_NOT_FOUND_RESOLVED));
+
+                log_conflicts_resolved.insert(findingMatches->str(1));
+                log_conflicts_resolved.insert(findingMatches->str(2));
+                
                 break;
 
             // Package required by another
@@ -405,6 +435,29 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                     default:
                         break;
                 }
+
+                log_requiredby_resolved.insert(findingMatches->str(1));
+                log_requiredby_resolved.insert(findingMatches->str(2));
+
+                break;
+            
+            // Dependency unable to be satisfied because not found in repositories
+            // It will be removed
+            case IssueType::DEPENDENCY_UNSATISFY:
+                printf("\n[DEPENDENCY UNSATISFIED] >> %s required by %s\n\n", findingMatches->str(1).c_str(), findingMatches->str(2).c_str());
+                printf("[REMOVING PACKAGE] >> %s to resolve the unsatisfied dependency.\n", findingMatches->str(2).c_str());
+                
+                // Trying to remove the package that has the unsatisfied dependency
+                remove_pkge_output = remove_package(findingMatches->str(2));
+                if (remove_pkge_output == "OK") {
+                    printf("\n[DEPENDENCY UNSATISFY RESOLVED] >> %s has been removed to resolve the unsatisfied dependency.\n", findingMatches->str(2).c_str());
+                    removed_pkges.erase(findingMatches->str(2)); // Removing from removed packages set to avoid reinstalling it later
+                    log_dependency_unsatisfy_removed.insert(findingMatches->str(2));
+
+                } else if (remove_pkge_output == "ERROR") {
+                    printf("\n[FAILED REMOVING PACKAGE] >> %s\n", findingMatches->str(2).c_str());
+                    exit(EXIT_FAILURE);
+                }
                 break;
 
             /* case IssueType::CONFLICT_FILES:
@@ -428,6 +481,8 @@ void inspect_regex_and_resolve(std::string *depends, std::regex *pattern_rgx, Is
                     do {
                         rm_output = remove_package(findingMatches->str(1));
                     } while (rm_output != "OK" && rm_output != "NOT_INSTALLED");
+
+                    log_not_found_in_repos.insert(findingMatches->str(1));
                     
                     break;
                 }
@@ -496,12 +551,14 @@ std::string remove_package(std::string packageName) {
             }
         }
 
+        // Reversing the order of packages to remove dependents first
         if (removed_pkges_requiredby.size() > 1) {
             // Reverse the order to remove dependents first before the target package
             // Using std::reverse from <algorithm>
             std::reverse(removed_pkges_requiredby.begin(), removed_pkges_requiredby.end());
         }
         
+        // Removing packages that require the target package first
         for (const auto& pkge : removed_pkges_requiredby) {
             remove_package(pkge);
         }
@@ -512,4 +569,87 @@ std::string remove_package(std::string packageName) {
         printf("[PACKAGE NOT INSTALLED] >> %s was not found in the system.\n", packageName.c_str());
         return "NOT_INSTALLED";
     }
+}
+
+
+// Function to write all logged actions to a file
+void write_log_file(const std::string& filename) {
+    FILE *logFile = fopen(filename.c_str(), "w");
+    if (!logFile) {
+        std::cerr << "Failed to create log file: " << filename << "\n";
+        return;
+    }
+
+    fprintf(logFile, "=== Package Conflict Resolution Log ===\n");
+    fprintf(logFile, "Date: %s\n\n", __DATE__);
+
+    // Packages removed and reinstalled
+    fprintf(logFile, "[PACKAGES REMOVED AND REINSTALLED]\n");
+    if (!log_removed_reinstalled.empty()) {
+        for (const auto& pkg : log_removed_reinstalled) {
+            fprintf(logFile, "  - %s\n", pkg.c_str());
+        }
+    } else {
+        fprintf(logFile, "  (none)\n");
+    }
+    fprintf(logFile, "\n");
+
+    // Packages removed but not reinstalled
+    fprintf(logFile, "[PACKAGES REMOVED BUT NOT REINSTALLED]\n");
+    if (!log_removed_not_reinstalled.empty()) {
+        for (const auto& pkg : log_removed_not_reinstalled) {
+            fprintf(logFile, "  - %s\n", pkg.c_str());
+        }
+    } else {
+        fprintf(logFile, "  (none)\n");
+    }
+    fprintf(logFile, "\n");
+
+    // Packages in conflict and resolved
+    fprintf(logFile, "[PACKAGES IN CONFLICT AND RESOLVED]\n");
+    if (!log_conflicts_resolved.empty()) {
+        for (const auto& pkg : log_conflicts_resolved) {
+            fprintf(logFile, "  - %s\n", pkg.c_str());
+        }
+    } else {
+        fprintf(logFile, "  (none)\n");
+    }
+    fprintf(logFile, "\n");
+
+    // Packages required-by and resolved
+    fprintf(logFile, "[PACKAGES REQUIRED-BY AND RESOLVED]\n");
+    if (!log_requiredby_resolved.empty()) {
+        for (const auto& pkg : log_requiredby_resolved) {
+            fprintf(logFile, "  - %s\n", pkg.c_str());
+        }
+    } else {
+        fprintf(logFile, "  (none)\n");
+    }
+    fprintf(logFile, "\n");
+
+    // Packages not found in repos
+    fprintf(logFile, "[PACKAGES NOT FOUND IN REPOS]\n");
+    if (!log_not_found_in_repos.empty()) {
+        for (const auto& pkg : log_not_found_in_repos) {
+            fprintf(logFile, "  - %s\n", pkg.c_str());
+        }
+    } else {
+        fprintf(logFile, "  (none)\n");
+    }
+    fprintf(logFile, "\n");
+
+    // Dependencies unsatisfied
+    fprintf(logFile, "[DEPENDENCIES UNSATISFIED AS NOT FOUND IN REPOS]\n");
+    if (!log_dependency_unsatisfy_removed.empty()) {
+        for (const auto& pkg : log_dependency_unsatisfy_removed) {
+            fprintf(logFile, "  - %s\n", pkg.c_str());
+        }
+    } else {
+        fprintf(logFile, "  (none)\n");
+    }
+    fprintf(logFile, "\n");
+
+    fprintf(logFile, "=== End of Log ===\n");
+    fclose(logFile);
+    printf("\n[LOG FILE UPDATED] >> %s\n", filename.c_str());
 }
